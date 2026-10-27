@@ -1,1 +1,3 @@
 recognition/Improved_UNet_48847056/HipMRI_Study_open
+recognition/Improved_UNet_48847056/.venv*
+recognition/Improved_UNet_48847056/__pycache__
