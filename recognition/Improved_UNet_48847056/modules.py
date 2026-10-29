@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 
 def _layers(dims):
-    """Return the (Conv, BatchNorm, MaxPool, ConvTranspose) classes for 2D or 3D."""
+    """Helper function that returns the layers needed for either 2D or 3D U-Net architecture"""
     if dims == 2:
         return nn.Conv2d, nn.BatchNorm2d, nn.MaxPool2d, nn.ConvTranspose2d
     if dims == 3:
@@ -23,18 +23,22 @@ def _layers(dims):
 
 
 class DoubleConv(nn.Module):
-    """(conv 3x3 -> BN -> ReLU) x 2. Two convs per level widen the receptive field
-    and add a non-linearity before each resolution change."""
+    """
+    (conv 3x3 -> BN -> ReLU) x 2. Two convs per level widen the receptive field
+    and add a non-linearity before each resolution change.
+    padding = 1 to make output size same as input.
+    """
 
     def __init__(self, in_ch, out_ch, dims=2):
         super().__init__()
-        Conv, BN, _, _ = _layers(dims)
+        Conv, BN, _, _ = _layers(dims) # only conv and batchnorm needed for init
         self.block = nn.Sequential(
             Conv(in_ch, out_ch, 3, padding=1, bias=False), BN(out_ch), nn.ReLU(inplace=True),
             Conv(out_ch, out_ch, 3, padding=1, bias=False), BN(out_ch), nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
+        # (N, in_ch, *spatial) ->(N, out_ch, *spatial) -- spatial size is unchanged
         return self.block(x)
 
 
@@ -50,20 +54,33 @@ class UNet(nn.Module):
     def __init__(self, in_ch=1, num_classes=6, base=32, depth=4, dims=2):
         super().__init__()
         _, _, Pool, UpConv = _layers(dims)
+        # channel widths per level
         chs = [base * 2**i for i in range(depth + 1)]  # e.g. 32,64,128,256,512
 
-        self.inc = DoubleConv(in_ch, chs[0], dims)
-        self.pool = Pool(2)
+        # Encoder (down) #
+        self.inc = DoubleConv(in_ch, chs[0], dims) # for the first level with no pooling
+        self.pool = Pool(2) # halves each spatial dim
+        # then double conv
         self.down = nn.ModuleList(DoubleConv(chs[i], chs[i + 1], dims) for i in range(depth))
+
+        # Decoder (up) #
+        # transposed conv, doubles spatial size, halves channels
         self.up = nn.ModuleList(UpConv(chs[i + 1], chs[i], 2, stride=2) for i in reversed(range(depth)))
+        # then double conv with the skip connection
         self.dec = nn.ModuleList(DoubleConv(chs[i] * 2, chs[i], dims) for i in reversed(range(depth)))
+
+        # 1x1 conv to map top level efatures to one logit per class per pixel/voxel
         self.head = _layers(dims)[0](chs[0], num_classes, 1)
 
     def forward(self, x):
+        # keep the output of each level to reuse in the decoder
         skips = [self.inc(x)]
         for down in self.down:
             skips.append(down(self.pool(skips[-1])))
-        x = skips.pop()  # bottleneck
+
+        x = skips.pop()  # get the bottleneck
+
+        # upsample and then fuse with encoder output at the same level
         for up, dec in zip(self.up, self.dec):
             x = up(x)
             x = dec(torch.cat([skips.pop(), x], dim=1))  # skip connection
@@ -73,15 +90,22 @@ class UNet(nn.Module):
 def dice_per_class(logits, target, num_classes, eps=1e-6):
     """Soft Dice for each class, averaged over the batch.
 
+    dice = 2|P n T| / (|P| + |T|). "Soft" means P is the softmax probability rather
+    than a hard 0/1 mask, so the score is differentiable and can be used in a loss.
+ 
     logits: (N, C, *spatial); target: (N, *spatial) int class indices.
     Returns a tensor of shape (C,).
+ 
+    Note: Dice is computed per sample, then averaged. For a 2D slice where a class
+    is absent, the score is ~0 unless the model predicts almost exactly nothing
+    for that class, so these slices push its probability towards zero.
     """
-    probs = logits.softmax(dim=1)
+    probs = logits.softmax(dim=1) # per-pixel class probs, sum to 1/C
     onehot = F.one_hot(target, num_classes).movedim(-1, 1).float()
-    dims = tuple(range(2, probs.ndim))  # spatial dims
-    inter = (probs * onehot).sum(dims)
-    denom = probs.sum(dims) + onehot.sum(dims)
-    return ((2 * inter + eps) / (denom + eps)).mean(0)
+    dims = tuple(range(2, probs.ndim))  # spatial dims 
+    inter = (probs * onehot).sum(dims) # soft |P n T|
+    denom = probs.sum(dims) + onehot.sum(dims) # |P| + |T|
+    return ((2 * inter + eps) / (denom + eps)).mean(0) # add eps to avoid divide by zero
 
 
 class DiceCELoss(nn.Module):
