@@ -1,10 +1,5 @@
 """
 dataset.py - data loading, patient-level splitting and augmentation for HipMRI segmentation.
-
-The Nifti loaders (to_channels, load_data_2D, load_data_3D) are the course-provided code from
-Appendix B. Everything under "Added by me" at the bottom is the layer built on top of them.
-One line in load_data_2D is also mine (marked ADDED): it resizes the few slices whose size
-differs from the first file, which otherwise crash the pre-allocated array.
 """
 
 import os
@@ -164,7 +159,7 @@ def load_data_3D(
 
 
 
-NUM_CLASSES = 6  # labels 0..5 including background (checked on the real data)
+NUM_CLASSES = 6  # labels 0..5 including background 
 
 
 def resize_2d(arr, size, is_label=False):
@@ -242,7 +237,7 @@ class SegDataset(Dataset):
     axis, 0, is left-right (checked by plotting a slice). For 3D, check with a plot first.
     """
 
-    def __init__(self, images, labels, augment=False, flip_axis=0):
+    def __init__(self, images, labels, augment=False, flip_axis=None):
         self.x = torch.from_numpy(images).unsqueeze(1)
         self.y = torch.from_numpy(labels)
         self.augment = augment
@@ -254,7 +249,7 @@ class SegDataset(Dataset):
     def __getitem__(self, i):
         x, y = self.x[i], self.y[i].long()
         if self.augment:
-            if torch.rand(1) < 0.5:  # mirror image and mask together along left-right
+            if self.flip_axis is not None and torch.rand(1) < 0.5:  # mirror image+mask left-right
                 x, y = x.flip(self.flip_axis + 1), y.flip(self.flip_axis)  # +1: x has a channel dim
             if torch.rand(1) < 0.5:  # intensity jitter on the image only
                 x = x * (0.9 + 0.2 * torch.rand(1)) + 0.2 * (torch.rand(1) - 0.5)
@@ -270,15 +265,72 @@ def get_dataloaders_2d(root, batch_size=16, num_workers=0, early_stop=False):
         imgs, labs = files[split]
         x = load_data_2D(imgs, normImage=True, early_stop=early_stop)
         y = load_data_2D(labs, dtype=np.uint8, early_stop=early_stop)
-        loaders.append(DataLoader(SegDataset(x, y, augment=(split == "train")),
+        loaders.append(DataLoader(SegDataset(x, y, augment=(split == "train"), flip_axis=0),
                                   batch_size=batch_size, shuffle=(split == "train"),
                                   num_workers=num_workers))
     return loaders
 
 
+def load_volumes(files, size, is_label, early_stop=False):
+    """Load 3D Nifti volumes and resample each to a fixed size=(H, W, D).
+
+    Volumes differ slightly in shape, so every one is resampled (nearest for labels so
+    class values are never blended, trilinear for images) instead of padded/clipped.
+    Images are z-score normalised per volume. Returns (N, H, W, D) float32 / uint8.
+    """
+    if early_stop:
+        files = files[:4]
+    out = np.zeros((len(files),) + tuple(size), dtype=np.uint8 if is_label else np.float32)
+    for i, f in enumerate(tqdm(files, desc="labels" if is_label else "images")):
+        v = nib.load(f).get_fdata(caching="unchanged")
+        if v.ndim == 4:
+            v = v[..., 0]  # sometimes an extra dim in HipMRI data
+        t = torch.from_numpy(np.ascontiguousarray(v, dtype=np.float32))[None, None]
+        if is_label:
+            t = torch.nn.functional.interpolate(t, size=size, mode="nearest")
+        else:
+            t = torch.nn.functional.interpolate(t, size=size, mode="trilinear", align_corners=False)
+            t = (t - t.mean()) / (t.std() + 1e-8)
+        out[i] = t[0, 0].numpy()
+    return out
+
+
+def volumes_to_slices(vols):
+    """(N, H, W, D) -> (N*D, H, W): every axial slice (last axis) becomes a 2D sample."""
+    return np.ascontiguousarray(np.moveaxis(vols, -1, 1).reshape(-1, *vols.shape[1:3]))
+
+
+def get_data_3d(root, dims, size=(128, 128, 64), batch_size=2, flip_axis=None,
+                num_workers=0, early_stop=False):
+    """Data for the 2D-vs-3D comparison, all from ONE patient-level split of the 3D volumes.
+
+    root: HipMRI_Study_open folder (contains semantic_MRs / semantic_labels_only).
+    dims=3: training samples are whole volumes. dims=2: training samples are the axial
+    slices of the same training volumes. Validation/test are always returned as whole
+    volumes (x, y arrays) so both models are scored on identical test patients.
+
+    Returns train_loader, (val_x, val_y), (test_x, test_y), test_files.
+    """
+    split = get_files_3d(root)
+    data = {}
+    for s in ("train", "validate", "test"):
+        imgs, labs = split[s]
+        data[s] = (load_volumes(imgs, size, False, early_stop), load_volumes(labs, size, True, early_stop))
+    tx, ty = data["train"]
+    if dims == 2:
+        tx, ty = volumes_to_slices(tx), volumes_to_slices(ty)
+    train_loader = DataLoader(SegDataset(tx, ty, augment=True, flip_axis=flip_axis),
+                              batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    return train_loader, data["validate"], data["test"], split["test"][0]
+
+
 if __name__ == "__main__":
     import sys
 
-    train_loader, val_loader, test_loader = get_dataloaders_2d(sys.argv[1], early_stop=True)
+    root, mode = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "2d_slices")
+    if mode == "2d_slices":  # course-provided keras slices
+        train_loader, val_loader, test_loader = get_dataloaders_2d(root, early_stop=True)
+    else:  # '2d' or '3d' from the 3D volumes
+        train_loader, *_ = get_data_3d(root, dims=int(mode[0]), early_stop=True)
     x, y = next(iter(train_loader))
     print("image", tuple(x.shape), x.dtype, "| mask", tuple(y.shape), y.dtype, "| labels", y.unique().tolist())
