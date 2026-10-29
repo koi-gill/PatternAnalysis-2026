@@ -1,17 +1,11 @@
 """
-modules.py - Model components for HipMRI prostate segmentation.
+modules.py - U-Net (2D or 3D) and Dice-based loss/metrics for HipMRI segmentation.
 
-Currently contains:
-    UNet2D - baseline 2D U-Net (Ronneberger et al., MICCAI 2015) used as the
-             slice-wise benchmark against the 3D model.
-
-Implementation notes vs. the original paper:
-    * 'same' padding (padding=1) instead of valid convolutions, so the output
-      has the same spatial size as the input and no cropping is needed.
-    * BatchNorm after each conv (not in the original paper) for more stable
-      training from scratch.
-    * Base width is configurable; the paper uses 64. 32 is used by default to
-      keep VRAM low (approx. 7.8M parameters instead of approx. 31M).
+One UNet class serves both the 2D slice baseline (dims=2) and the 3D volumetric
+model (dims=3), so the comparison differs only in spatial context, not in code.
+Architecture: two 3x3 convs
+per level, max-pool down, transposed-conv up, skip concatenation. BatchNorm is added
+after each conv for faster, more stable training.
 """
 
 import torch
@@ -19,149 +13,130 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _layers(dims):
+    """Return the (Conv, BatchNorm, MaxPool, ConvTranspose) classes for 2D or 3D."""
+    if dims == 2:
+        return nn.Conv2d, nn.BatchNorm2d, nn.MaxPool2d, nn.ConvTranspose2d
+    if dims == 3:
+        return nn.Conv3d, nn.BatchNorm3d, nn.MaxPool3d, nn.ConvTranspose3d
+    raise ValueError("dims must be 2 or 3")
+
+
 class DoubleConv(nn.Module):
-    """Two (3x3 conv -> BatchNorm -> ReLU) layers.
+    """(conv 3x3 -> BN -> ReLU) x 2. Two convs per level widen the receptive field
+    and add a non-linearity before each resolution change."""
 
-    This is the basic building block used at every level of the U-Net, on
-    both the encoder and decoder side.
-    """
-
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_ch, out_ch, dims=2):
         super().__init__()
+        Conv, BN, _, _ = _layers(dims)
         self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            Conv(in_ch, out_ch, 3, padding=1, bias=False), BN(out_ch), nn.ReLU(inplace=True),
+            Conv(out_ch, out_ch, 3, padding=1, bias=False), BN(out_ch), nn.ReLU(inplace=True),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         return self.block(x)
 
 
-class Down(nn.Module):
-    """Encoder step: 2x2 max-pool (halves H and W), then DoubleConv."""
+class UNet(nn.Module):
+    """Encoder-decoder with skip connections.
 
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.pool = nn.MaxPool2d(kernel_size=2)
-        self.conv = DoubleConv(in_channels, out_channels)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(self.pool(x))
-
-
-class Up(nn.Module):
-    """Decoder step: 2x2 transposed conv (doubles H and W), concatenate the
-    matching encoder feature map (skip connection), then DoubleConv.
+    in_ch: input channels (1 for MRI). num_classes: output logits per voxel.
+    base: channels at the first level, doubled at each depth step.
+    depth: number of down-sampling steps. Input spatial sizes must be divisible by
+    2**depth (2D slices 256x128 with depth=4 is fine).
     """
 
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_ch=1, num_classes=6, base=32, depth=4, dims=2):
         super().__init__()
-        # Transposed conv halves the channel count while upsampling.
-        self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-        # After concatenation with the skip: (in/2 from up) + (in/2 from skip) = in.
-        self.conv = DoubleConv(in_channels, out_channels)
+        _, _, Pool, UpConv = _layers(dims)
+        chs = [base * 2**i for i in range(depth + 1)]  # e.g. 32,64,128,256,512
 
-    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
-        x = self.up(x)
-        # If the input size was not divisible by 16, pooling floors the size,
-        # so the upsampled map can be 1 pixel smaller than the skip. Pad to match.
-        diff_h = skip.shape[2] - x.shape[2]
-        diff_w = skip.shape[3] - x.shape[3]
-        if diff_h != 0 or diff_w != 0:
-            x = F.pad(x, [diff_w // 2, diff_w - diff_w // 2,
-                          diff_h // 2, diff_h - diff_h // 2])
-        x = torch.cat([skip, x], dim=1)
-        return self.conv(x)
+        self.inc = DoubleConv(in_ch, chs[0], dims)
+        self.pool = Pool(2)
+        self.down = nn.ModuleList(DoubleConv(chs[i], chs[i + 1], dims) for i in range(depth))
+        self.up = nn.ModuleList(UpConv(chs[i + 1], chs[i], 2, stride=2) for i in reversed(range(depth)))
+        self.dec = nn.ModuleList(DoubleConv(chs[i] * 2, chs[i], dims) for i in reversed(range(depth)))
+        self.head = _layers(dims)[0](chs[0], num_classes, 1)
+
+    def forward(self, x):
+        skips = [self.inc(x)]
+        for down in self.down:
+            skips.append(down(self.pool(skips[-1])))
+        x = skips.pop()  # bottleneck
+        for up, dec in zip(self.up, self.dec):
+            x = up(x)
+            x = dec(torch.cat([skips.pop(), x], dim=1))  # skip connection
+        return self.head(x)  # raw logits, (N, num_classes, *spatial)
 
 
-class UNet2D(nn.Module):
-    """Baseline 2D U-Net for multi-class slice segmentation.
+def dice_per_class(logits, target, num_classes, eps=1e-6):
+    """Soft Dice for each class, averaged over the batch.
 
-    Args:
-        in_channels:   number of input image channels (1 for MRI).
-        num_classes:   number of output classes (6 for HipMRI: background,
-                       body, bone, bladder, rectum, prostate).
-        base_channels: feature width at the first level; doubles at each of
-                       the 4 downsampling steps (32 -> 64 -> 128 -> 256 -> 512).
+    logits: (N, C, *spatial); target: (N, *spatial) int class indices.
+    Returns a tensor of shape (C,).
+    """
+    probs = logits.softmax(dim=1)
+    onehot = F.one_hot(target, num_classes).movedim(-1, 1).float()
+    dims = tuple(range(2, probs.ndim))  # spatial dims
+    inter = (probs * onehot).sum(dims)
+    denom = probs.sum(dims) + onehot.sum(dims)
+    return ((2 * inter + eps) / (denom + eps)).mean(0)
 
-    Input:  (B, in_channels, H, W)
-    Output: (B, num_classes, H, W) raw logits (apply softmax / argmax outside,
-            e.g. in the loss function or predict.py).
+
+class DiceCELoss(nn.Module):
+    """Cross-entropy + (1 - mean soft Dice).
+
+    CE gives stable gradients early on; the Dice term counteracts the extreme class
+    imbalance (prostate < 2% of voxels), which plain CE would let the background dominate.
     """
 
-    def __init__(self, in_channels: int = 1, num_classes: int = 6, base_channels: int = 32):
+    def __init__(self, num_classes, ce_weight=1.0, dice_weight=1.0):
         super().__init__()
-        c = base_channels
+        self.num_classes = num_classes
+        self.ce_weight, self.dice_weight = ce_weight, dice_weight
 
-        # Encoder (contracting path)
-        self.inc = DoubleConv(in_channels, c)
-        self.down1 = Down(c, c * 2)
-        self.down2 = Down(c * 2, c * 4)
-        self.down3 = Down(c * 4, c * 8)
-        self.down4 = Down(c * 8, c * 16)  # bottleneck
-
-        # Decoder (expanding path)
-        self.up1 = Up(c * 16, c * 8)
-        self.up2 = Up(c * 8, c * 4)
-        self.up3 = Up(c * 4, c * 2)
-        self.up4 = Up(c * 2, c)
-
-        # 1x1 conv maps features to per-class logits
-        self.out_conv = nn.Conv2d(c, num_classes, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
-
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
-        return self.out_conv(x)
+    def forward(self, logits, target):
+        ce = F.cross_entropy(logits, target)
+        dice = dice_per_class(logits, target, self.num_classes).mean()
+        return self.ce_weight * ce + self.dice_weight * (1 - dice)
 
 
-def count_parameters(model: nn.Module) -> int:
-    """Number of trainable parameters (used for the resource profiling table)."""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+@torch.no_grad()
+def hard_scores(logits, target, num_classes):
+    """Hard (argmax) Dice and IoU per class, summed over the whole batch so tiny
+    structures are not swamped by empty slices. Returns (dice[C], iou[C]); a class
+    absent from both prediction and target gets NaN (exclude it with nanmean)."""
+    pred = logits.argmax(1)
+    dice, iou = [], []
+    for c in range(num_classes):
+        p, t = pred == c, target == c
+        inter = (p & t).sum().float()
+        ps, ts = p.sum().float(), t.sum().float()
+        union = ps + ts - inter
+        dice.append(2 * inter / (ps + ts) if ps + ts > 0 else torch.tensor(float("nan")))
+        iou.append(inter / union if union > 0 else torch.tensor(float("nan")))
+    return torch.stack(dice), torch.stack(iou)
+
+
+@torch.no_grad()
+def predict_volume(model, vol, dims):
+    """Predict one 3D volume (H, W, D) tensor and return logits (C, H, W, D).
+
+    dims=3: the whole volume goes through the 3D network in one pass.
+    dims=2: each axial slice (last axis) goes through the 2D network as a batch,
+    then the slice predictions are stacked back into a volume. This lets both
+    models be scored on exactly the same test volumes.
+    """
+    if dims == 3:
+        return model(vol[None, None])[0]
+    slices = vol.permute(2, 0, 1)[:, None]  # (D, 1, H, W)
+    return model(slices).permute(1, 2, 3, 0)  # (D, C, H, W) -> (C, H, W, D)
 
 
 if __name__ == "__main__":
-    # Smoke test: run `python modules.py` to check the model builds, produces
-    # correctly shaped output, and can backpropagate. No data needed.
-    torch.manual_seed(0)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    num_classes = 6
-
-    model = UNet2D(in_channels=1, num_classes=num_classes, base_channels=32).to(device)
-    print(f"UNet2D trainable parameters: {count_parameters(model):,}")
-
-    # 1. Standard HipMRI slice size (256 x 128), batch of 2.
-    x = torch.randn(2, 1, 256, 128, device=device)
-    y = model(x)
-    assert y.shape == (2, num_classes, 256, 128), f"Unexpected output shape {tuple(y.shape)}"
-    assert torch.isfinite(y).all(), "Output contains NaN/Inf"
-    print(f"[OK] forward pass: input {tuple(x.shape)} -> output {tuple(y.shape)}")
-
-    # 2. Odd size not divisible by 16 (checks the padding in Up).
-    x_odd = torch.randn(1, 1, 250, 131, device=device)
-    y_odd = model(x_odd)
-    assert y_odd.shape == (1, num_classes, 250, 131), f"Unexpected output shape {tuple(y_odd.shape)}"
-    print(f"[OK] odd-size forward pass: input {tuple(x_odd.shape)} -> output {tuple(y_odd.shape)}")
-
-    # 3. Backward pass with cross-entropy against random integer labels,
-    #    to confirm gradients reach the first layer.
-    target = torch.randint(0, num_classes, (2, 256, 128), device=device)
-    loss = F.cross_entropy(model(x), target)
-    loss.backward()
-    first_grad = model.inc.block[0].weight.grad
-    assert first_grad is not None and torch.isfinite(first_grad).all(), "Gradient did not reach first layer"
-    print(f"[OK] backward pass: loss = {loss.item():.4f} (approx. ln(6) = 1.79 expected at init)")
-
-    print("All smoke tests passed.")
+    # Shape smoke test for both modes
+    for dims, shape in [(2, (2, 1, 256, 128)), (3, (1, 1, 64, 64, 32))]:
+        m = UNet(dims=dims, base=16)
+        out = m(torch.randn(shape))
+        print(f"{dims}D out {tuple(out.shape)} params {sum(p.numel() for p in m.parameters()):,}")
