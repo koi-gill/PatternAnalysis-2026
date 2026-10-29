@@ -206,7 +206,7 @@ def main():
               f"val prostate Dice {pd:.4f} mean Dice {md:.4f} ({hist['epoch_sec'][-1]:.0f}s){flag}")
 
         # redraw each epoch in case the run stops early
-        plot_history(hist, os.path.join(args.out, f"{name}_curves.png"))
+        plot_history(hist, os.path.join(args.out, f"{name}_curves.png"), name)
 
     # highest VRAM use during training
     peak_train_mb = torch.cuda.max_memory_allocated() / 2**20 if device.type == "cuda" else float("nan")
