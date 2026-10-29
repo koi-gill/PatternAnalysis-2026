@@ -97,14 +97,22 @@ def evaluate(model, vols, labels, dims, device, amp):
             "slice_prostate_dice": slice_dice, "sec_per_volume": float(np.mean(times))}
 
 
-def plot_history(hist, path):
-    """training curves for loss and validation Dice per epoch"""
+def plot_history(hist, path, model_name=""):
+    """Save training curves: loss (left) and validation Dice (right) per epoch.
+
+    model_name (e.g. "unet2d") is shown in the overall figure title, so the 2D and
+    3D curve images can be told apart in the README.
+    """
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
     ax[0].plot(hist["train_loss"], label="train loss")
+    ax[0].set_title("Training loss")
     ax[0].set_xlabel("epoch"); ax[0].set_ylabel("Dice + CE loss"); ax[0].legend()
     ax[1].plot(hist["val_prostate_dice"], label="val prostate Dice")
     ax[1].plot(hist["val_mean_dice"], label="val mean Dice (no background)")
+    ax[1].set_title("Validation Dice")
     ax[1].set_xlabel("epoch"); ax[1].set_ylabel("Dice"); ax[1].set_ylim(0, 1); ax[1].legend()
+    if model_name:
+        fig.suptitle(f"{model_name} training curves")  # title over both panels
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
