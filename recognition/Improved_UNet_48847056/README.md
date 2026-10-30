@@ -1,32 +1,3 @@
-# Documentation via README.md - 10 Marks
-Once your algorithm has been implemented, you will need to provide sufficient comments in your
-code and comprehensive documentation of your algorithm in a README.md file. The readme file should
-contain:
-- A title, a description of the algorithm and the problem that it solves (approximately a paragraph),
-how it works in a paragraph, and a figure/visualisation.
-- Your one-page written feasibility review from Section 3.
-- Any dependencies required, including exact versions, and address reproducibility of results.
-- Example inputs, outputs, and visual plots of your algorithm.
-- Description of any specific pre-processing used, with references if any. Justify your training,
-validation, and testing splits of the data.
-- Investigation of the Open Research Dilemma:
-- Quantitative benchmarking of your chosen model against your implemented baseline model under
-identical evaluation splits.
-14
-- Resource profiling table documenting computational efficiency (peak GPU VRAM, parameter
-count, and inference runtime/latency).
-- In-depth qualitative error autopsies analyzing 3–5 representative failure cases from the dataset
-(diagnosing root triggers and failure modes).
-- Actionable engineering recommendation and trade-off synthesis for your project manager.
-- The mandatory Artificial Intelligence Usage Disclosure subsection (see Section 6).
-Marking Criteria:
-1. Description and explanation of the working principles of the algorithm implemented and the problem
-it solves (5 Marks).
-2. Description of usage and comments throughout scripts (3 marks).
-3. Proper formatting using GitHub markdown (2 marks).
-
----
-
 # 2D vs 3D U-Net for Prostate Segmentation in Radiotherapy MRI (HipMRI)
 
 ## 1. Algorithm and Problem Description
@@ -84,6 +55,7 @@ Fallback – code should be compatible with Rangpur so that if GPU lab quota run
 - **Labels:** stored as integer class indices and one-hot encoded inside the loss, which saves memory.
 - **HD95** was not implemented due to time. Position along the gland is instead measured with Dice binned into 10 positions from base to apex (Section 5.2), plus visual failure overlays (Section 5.4).
 - **Acceptance criteria outcome:**
+
 | Criterion | Target | Result | Met? |
 |---|---|---|---|
 | 2D prostate Dice | ≥ 0.75 | 0.792 | ✅ |
@@ -169,10 +141,48 @@ As mentioned in the task sheet, the global Dice score is dominated by the centra
 | Inference time per volume (ms) | 4.9 | 8.8 |
 
 
+Inference time and VRAM come from the final test pass in `train.py`, where the model has already run many validation passes. A second timing in `predict.py` evaluated the 2D model first without a warm-up, so it included one-off CUDA initialisation (26.3 ms) and was discluded. Training VRAM is for a batch of 16 slices (2D) versus 2 whole volumes (3D) on an NVIDIA A100 (40 GB) (on rangpur)
+
+At this downsampled resolution, the 3D model's extra cost is small in absolute terms: about 1.3 GB to train and under 10 ms per volume. Memory grows roughly with the voxel count, though, so 3D training at native resolution would cost several times more and might need patch-based training on smaller GPUs.
 
 ### 5.4 Failure case autopsy
+The four cases below were selected automatically by `predict.py` as the test slices with the lowest 3D U-Net prostate Dice. Each figure shows the input, ground truth (orange = body, green = bone, red = bladder, purple = rectum, brown = prostate), and each model's prostate prediction (green = correct, red = false positive, blue = false negative).
+
+**1. Missed apex: H007 Week 0, slice 24 (position 1.00)**
+![failure 1](figures/failure_1.png)
+This is the last slice of the prostate at the apex. Here the gland covers only a few voxels, just forward from the rectum. The 3D model predicts no prostate at all (Dice 0.00). The 2D model finds a fraction of it (Dice 0.16), but also places a larger false positive next to the rectum. At the apex the prostate tapers into the pelvic floor muscles, where contrast is low, and at 128×128 resolution it is only a few voxels. The 3D model's smooth inter-slice shape appears to end the gland one slice too early risking leaving tumour outside the treated volume due to under-contouring
+ 
+**2. Prostate predicted above the base: K042 Week 0, slice 42 (no prostate in ground truth)**
+![failure 2](figures/failure_2.png)
+Both models predict a small prostate region at the edge of the bladder, between the bladder and the rectum, on a slice the annotator labelled as having no prostate. This is an example of over-contouring, extending the target into the bladder wall raises the risk of radiation cystitis.
+
+**3. Missed apex: M015 Week 0, slice 28 (position 1.00)**
+![failure 3](figures/failure_3.png)
+This is similar to case 1, but here **both** models miss the prostate apex entirely (Dice 0.00). The labelled prostate is only a handful of voxels, and the rectum beside it is also very small at this level. Neither 2D appearance nor 3D context recovers it, so this case falls outside what either model can reliably do.
+ 
+**4. 3D-specific overshoot above the base: M015 Week 1, slice 40 (no prostate in ground truth)**
+![failure 4](figures/failure_4.png)
+The 2D model correctly predicts no prostate here; its Dice is undefined (shown as "nan") because both the prediction and the ground truth are empty. The 3D model places small false-positive specks at the bladder–rectum interface. This shows the cost of 3D context: inter-slice continuity helps on hard slices inside the gland, but it can also carry the prostate shape one slice past where the gland ends. This is consistent with the 3D model's lower bladder Dice (0.755 vs 0.826), suggesting confusion at the bladder–prostate boundary.
+ 
+**Summary of failures:** all four worst slices sit at the ends of the prostate (two at the apex, two just beyond the base), and none are in the mid-gland. Every one has Dice 0.00, because a structure only a few voxels across scores zero if it is missed or wrongly predicted. This matches the base-to-apex curve, where both end bins stay near 0.6 Dice for both models.
 
 ## 6. Recommendations for the Project Manager
+
+**Adopt the 3D U-Net for prostate contour drafting with manual review of the first and last ~10% of slices of the gland (base and apex).**
+ 
+- **Accuracy:** the 3D model improves prostate Dice from 0.792 to 0.847 and the worst patient from 0.702 to 0.751. It is better in every base-to-apex position bin, by up to about +0.1 at the base and in the lower half of the gland.
+- **Cost:** at this resolution the extra cost is small (1.3 GB vs 0.3 GB of training VRAM, 8.8 vs 4.9 ms per volume, about 5 minutes to train). This is not the 5–10× burden the dilemma warns of, so the gain is worth it here.
+- **What 3D context does not fix:** at both ends of the gland, Dice remains around 0.6 for both models. The worst failures are missed apex slices (under-contouring, recurrence risk) and predictions extending past the base into the bladder neck (over-contouring, cystitis risk). 3D context seems to be capable of causing the latter (failure case 4).
+- **Other structures:** the 3D bladder contour is worse than the 2D one (0.755 vs 0.826) and should not be used for bladder dose constraints without review. A practical option is to use the 3D model for prostate and the 2D model for bladder.
+- **Not suitable for automated drafting:** apex slices where the gland is only a few voxels across, and the bladder-neck slices just above the base. (evidenced by failure case 3)
+
+**Limitations:** 
+- prototype used a single training seed
+- only 5 test patients, some contributing several weekly scans, so per-volume results are correlated
+- evaluation at downsampled resolution (128×128×64), not native resolution
+- base/apex orientation inferred from the bladder position
+- no boundary-distance metric (HD95). 
+Before clinical use, the model should be validated on more patients at native resolution.
 
 ## 7. Usage
 
@@ -208,6 +218,19 @@ python predict.py --root /path/to/HipMRI_Study_open
 **Outputs** (written to `outputs/`, which is git-ignored): `unet{2,3}d_best.pt` checkpoints, `unet{2,3}d_results.json` with all metrics and history, `unet{2,3}d_curves.png`, and from `predict.py`: `comparison.md`, `slice_position.png` and `failure_*.png`. The figures in this README were copied to `figures/`.
 
 ## 8. Dependencies and Reproducibility
+
+| Package | Version |
+|---|---|
+| Python | 3.11.15 |
+| PyTorch | 2.13.0+cu130 |
+| nibabel | 5.4.2 |
+| NumPy | 2.4.6 |
+| Matplotlib | 3.11.2 |
+| tqdm | 4.70.1 |
+ 
+Hardware: NVIDIA A100-PCIE-40GB (Rangpur `comp3710` partition).
+ 
+**Reproducibility:** the patient split uses a fixed seed of 42 and training uses seed 0, so the split is identical on every run.
 
 ## 9. Artificial Intelligence Disclosure
 
