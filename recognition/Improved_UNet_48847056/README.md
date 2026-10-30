@@ -29,6 +29,9 @@ it solves (5 Marks).
 
 # 2D vs 3D U-Net for Prostate Segmentation in Radiotherapy MRI (HipMRI)
 
+## 1. Algorithm and Problem Description
+External-beam radiotherapy for prostate cancer requires the prostate to be contoured on all MRI slices with millimeter precision. Under-contouring poses a risk of tumor reoccurence, and over-contouring can irradiate neighboring organs and tissue potentially causing inflammation and damage. Manually contouring is a slow and tedious process, hence, this project tests a deep-learning drafting assistant that proposes contours for a specialist to review. The investigation is the dilemma of spatial context in this model. A 2D model segments each slice on its own and is relatively cheap to train, while a 3D model can use the spatial context of the whole 3D volume and in theory should produce more continuous contours. 
+
 ![Original U-Net architecture: a contracting encoder (64 to 1024 channels) and an expanding decoder joined by copy-and-crop skip connections, producing a 2-class segmentation map.](images/Screenshot%202026-10-30%20123109.png)
 *Figure 1: Basic U-Net architecture as provided in the lecture slides*
 
@@ -37,7 +40,7 @@ it solves (5 Marks).
 
 
 
-# Feasibility Review
+# 2. Feasibility Review
 ## User Need, Focus, and Acceptance Criteria
 User is a radiotherapy imaging specialist that works with anatomical contours of the prostate gland
 Prototype purpose: to investigate whether the true 3d volumetric continuity of a 3D U-Net model can eliminate the boundary and slice-transition errors of a 2D U-Net baseline in prostate radiotherapy planning, or if it only refines the easy central slices while consuming much more compute.
@@ -69,3 +72,17 @@ Only 38 patients – stratified results may be noisy, and test set only contains
 Primary computing budget: using the cloud hosted GPUs run by UQ’s GPU lab – hard quota of 26 hrs run time total.
 Fallback – code should be compatible with Rangpur so that if GPU lab quota run’s out, it can be run on the Rangpur GPUs
 2D Improved UNet as a back up model
+
+# 3. Data, Pre-processing and Splits
+
+# 4. Training Setup
+
+# 5. Results: Investigating the Spatial Context Dilemma
+
+# 6. Recommendations for the Project Manager
+
+# 7. Usage
+
+# 8. Dependencies and Reproducibility
+
+# 9. Artificial Intelligence Disclosure
