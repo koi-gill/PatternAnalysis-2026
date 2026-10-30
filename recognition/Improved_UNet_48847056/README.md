@@ -30,8 +30,10 @@ it solves (5 Marks).
 # 2D vs 3D U-Net for Prostate Segmentation in Radiotherapy MRI (HipMRI)
 
 ![Original U-Net architecture: a contracting encoder (64 to 1024 channels) and an expanding decoder joined by copy-and-crop skip connections, producing a 2-class segmentation map.](images/Screenshot%202026-10-30%20123109.png)
+*Figure 1: Basic U-Net architecture as provided in the lecture slides*
 
 ![MRI U-Net: a 1-channel input, a four-level encoder (16 to 128 channels), a 256-channel bottleneck, and a decoder with skip connections, ending in a 1×1 conv to 6 class logits](images/UNet%20architecture.drawio.png)
+*Figure 2: U-Net architecture used for both the 2D and 3D U-Net models. Only difference is the convolution dimensions*
 
 
 
