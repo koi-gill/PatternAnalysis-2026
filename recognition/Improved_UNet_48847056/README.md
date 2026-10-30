@@ -129,9 +129,46 @@ All numbers are on the same held-out test split (5 patients, whole volumes at 12
 
 ### 5.1 Segmentation accuracy
 
+| Metric | 2D U-Net (baseline) | 3D U-Net |
+|---|---|---|
+| Body Dice / IoU | 0.966 / 0.934 | **0.972 / 0.945** |
+| Bone Dice / IoU | 0.897 / 0.813 | **0.903 / 0.824** |
+| Bladder Dice / IoU | **0.826 / 0.704** | 0.755 / 0.607 |
+| Rectum Dice / IoU | **0.820 / 0.696** | 0.816 / 0.689 |
+| **Prostate Dice / IoU** | 0.792 / 0.656 | **0.847 / 0.734** |
+| Prostate Dice per volume, mean (worst) | 0.786 (0.702) | **0.838 (0.751)** |
+ 
+Both models pass their respective prostate target. The 3D model improves prostate Dice by 0.055 and lifts the worst test volume from 0.702 to 0.751. Its bladder Dice drops by 0.07, however, so 3D context does not help every structure.
+
 ### 5.2 Where along the prostate the models fail (base to apex)
 
+As mentioned in the task sheet, the global Dice score is dominated by the central slices of the prostate. To test this dilemma, each test slice which contained the prostate was binned by its position between the base (bladder end) and the apex, and per-slice Dice was averaged within each bin. To determine the base slice, the bladder position is determined by averaging the slices containing the bladder. 
+
+![Prostate Dice from base to apex](figures/slice_position.png)
+ 
+| Position bin | 0.0–0.1 (base) | 0.1–0.2 | 0.2–0.3 | 0.3–0.4 | 0.4–0.5 | 0.5–0.6 | 0.6–0.7 | 0.7–0.8 | 0.8–0.9 | 0.9–1.0 (apex) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 2D U-Net | 0.496 | 0.795 | 0.853 | 0.885 | 0.876 | 0.866 | 0.816 | 0.760 | 0.710 | 0.556 |
+| 3D U-Net | 0.596 | 0.835 | 0.898 | 0.907 | 0.909 | 0.902 | 0.877 | 0.865 | 0.797 | 0.597 |
+| Slices per bin | 31 | 20 | 24 | 23 | 18 | 25 | 24 | 23 | 21 | 35 |
+
+- Both models score about 0.9 on central slices but drop to 0.5–0.6 at the two ends. The global Dice of 0.79–0.85 hides this as expected
+- The 3D model is better in **every** bin. The largest gains are at the base (+0.10) and in the lower half towards the apex (+0.06 to +0.11 in bins 0.6–0.9), where slice-to-slice continuity helps most.
+- At the extreme apex the gain is only +0.04, and both end bins remain near 0.6. This data implies that <ins>3D context **reduces** the end-slice failures but does **not eliminate** them.</ins>
+
+
 ### 5.3 Computational cost
+
+| | 2D U-Net | 3D U-Net |
+|---|---|---|
+| Parameters | 1,942,374 | 5,646,470 (2.9×) |
+| Peak VRAM, training (MB) | 284 | 1,297 (4.6×) |
+| Peak VRAM, inference (MB) | 284 | 358 |
+| Mean epoch time (s) | 8.9 | 5.0 |
+| Total training time | ~4.5 min (30 epochs) | ~5 min (60 epochs) |
+| Inference time per volume (ms) | 4.9 | 8.8 |
+
+
 
 ### 5.4 Failure case autopsy
 
@@ -173,3 +210,20 @@ python predict.py --root /path/to/HipMRI_Study_open
 ## 8. Dependencies and Reproducibility
 
 ## 9. Artificial Intelligence Disclosure
+
+- **Tools used:** Anthropic Claude (chat).
+- **What it assisted with:** 
+    - scaffolding dataset loader
+    - patient-level split
+    - the command-line options in `train.py`
+    - the evaluation and figure code in `predict.py`
+    - Slurm/Rangpur job scripts and debugging (conda environment activation, job dependencies); and drafting parts of this README from my own experiment results.
+    - Structuring JSON outputs and consolidating/comparing the results of both models to make it understandable
+    - github markdown syntax for tables specifically 
+- **My verification methods** 
+    - smoke-tested every script on a small subset before the full runs
+    - checked tensor shapes and that all six labels load
+    - confirmed `check_no_leakage` reports no patient overlap (27/6/5 patients)
+    - inspected training curves and per-slice results myself
+    - checked the failure overlays against the raw images and ground truth
+    - cross-checked timing numbers between `train.py` and `predict.py`, which exposed and corrected a warm-up bias in the latter.
