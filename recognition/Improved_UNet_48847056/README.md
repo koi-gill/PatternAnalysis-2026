@@ -40,17 +40,17 @@ External-beam radiotherapy for prostate cancer requires the prostate to be conto
 
 
 
-# 2. Feasibility Review
-## User Need, Focus, and Acceptance Criteria
+## 2. Feasibility Review
+### User Need, Focus, and Acceptance Criteria
 User is a radiotherapy imaging specialist that works with anatomical contours of the prostate gland
 Prototype purpose: to investigate whether the true 3d volumetric continuity of a 3D U-Net model can eliminate the boundary and slice-transition errors of a 2D U-Net baseline in prostate radiotherapy planning, or if it only refines the easy central slices while consuming much more compute.
-## Acceptance criteria
+### Acceptance criteria
 - Prostate label dice sim. >= 0.75 for 2d U-Net, global dice sim. >= 0.7 for 3d U-Net (test patients)
     - Global dice similarity may not capture the success of the model for the base and apex slices, but provides a good validity check
 - Stratified Dice similarity by slice position (base, mid, apex) accompanied by HD95 to quantify the gap between predicted boundary and ground truth for each stratum.
     - This helps determine and quantify where 3D U-Net differs from 2D U-Net for each primary area of the prostate scans.
 - Peak GPU VRAM and inference time per volume stays under 4 GB/5 seconds for 2D U-Net and 12 GB/15 seconds for 3D U-Net
-## Model Choice & Course Concepts
+### Model Choice & Course Concepts
 - Dataset configuration:
     - HipMRI study: 38 patients, 211 3d volumes, labels: body, bone, bladder, rectum, prostate. 
     - Patient-level splitting: all slices from a given patient end up in the same train/validation/test split. Prevents leakage between sets. typical split ratio to be ## used: 70/15/15 -> 26/6/6 patients. 
@@ -61,28 +61,28 @@ Prototype purpose: to investigate whether the true 3d volumetric continuity of a
     - Filters starting at 32/16, doubling each level.
     - Block: 2 x (3x3 conv, norm, ReLU) (3d convolution for 3D UNet)
     - Models kept similar in architecture aside from increase in convolution dimension – this should allow test results to better reflect the effectiveness of using a 3D UNet over a 2D one. 
-## Preliminary Feasibility Evidence:
+### Preliminary Feasibility Evidence:
 Initial Data Audit: scans are of 38 patients some over a period of up to 7 weeks of radiotherapy – for the 3d data it is difficult to tell what scans belong to a single patient.
 Results of baseline smoke-test experiment/resource estimate for TinyUNet3d on cloud-hosted GPU: 
 - (64, 64, 32) peak VRAM: 0.07 GiB
 - (128, 128, 64) peak VRAM: 0.56 GiB
-## Risks, Budget, and Fallback
+### Risks, Budget, and Fallback
 Training 3D-UNet may exceed memory or time limitations – mitigation: train using sub-sections to begin with; mixed precision training, possibly lower input resolution if needed
 Only 38 patients – stratified results may be noisy, and test set only contains 6 patients with the proposed splitting ratio. Treatment: report per-patient values for test set. Could possibly implement k-fold cross val
 Primary computing budget: using the cloud hosted GPUs run by UQ’s GPU lab – hard quota of 26 hrs run time total.
 Fallback – code should be compatible with Rangpur so that if GPU lab quota run’s out, it can be run on the Rangpur GPUs
 2D Improved UNet as a back up model
 
-# 3. Data, Pre-processing and Splits
+## 3. Data, Pre-processing and Splits
 
-# 4. Training Setup
+## 4. Training Setup
 
-# 5. Results: Investigating the Spatial Context Dilemma
+## 5. Results: Investigating the Spatial Context Dilemma
 
-# 6. Recommendations for the Project Manager
+## 6. Recommendations for the Project Manager
 
-# 7. Usage
+## 7. Usage
 
-# 8. Dependencies and Reproducibility
+## 8. Dependencies and Reproducibility
 
-# 9. Artificial Intelligence Disclosure
+## 9. Artificial Intelligence Disclosure
