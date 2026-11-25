@@ -1,4 +1,5 @@
 # 2D vs 3D U-Net for Prostate Segmentation in Radiotherapy MRI (HipMRI)
+Author: Carl McGill - 48847056
 
 ## 1. Algorithm and Problem Description
 External-beam radiotherapy for prostate cancer requires the prostate to be contoured on all MRI slices with millimeter precision. Under-contouring poses a risk of tumor reoccurence, and over-contouring can irradiate neighboring organs and tissue potentially causing inflammation and damage. Manually contouring is a slow and tedious process, hence, this project tests a deep-learning drafting assistant that proposes contours for a specialist to review. The investigation is the dilemma of spatial context in this model. A 2D model segments each slice on its own and is relatively cheap to train, while a 3D model can use the spatial context of the whole 3D volume and in theory should produce more continuous contours. This project trains both models on the same patient-level split and measures the difference that 3D context makes.
